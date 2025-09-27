@@ -55,3 +55,11 @@ test_*.py
 # Model cache (sentence-transformers downloads models here)
 .cache/
 model_cache/
+
+# Local vector index (RAG-mini)
+lite_index/
+
+# Dev-only helper scripts
+check_available_models.py
+debug.py
+eval.py

@@ -1,11 +1,27 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from rag_simple import SimpleRAG, _read_pdf, normalize_ocr_text
+from contextlib import asynccontextmanager
+from rag_simple import SimpleRAG, _read_pdf
 import shutil
 import os
 
-app = FastAPI()
+rag = SimpleRAG()
+os.makedirs("documents", exist_ok=True)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🔁 Ingesting existing documents on startup...")
+    try:
+        rag.ingest_folder("documents")
+        print("✅ Ingestion complete")
+    except Exception as e:
+        print(f"⚠️ Ingestion failed: {e}")
+    yield
+    print("🛑 Server shutting down")
+
+# ✅ THIS LINE IS THE KEY FIX
+app = FastAPI(lifespan=lifespan)
 
 # ------------------- CORS ---------------------
 app.add_middleware(
@@ -15,10 +31,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ------------------- Init ---------------------
-rag = SimpleRAG()
-os.makedirs("documents", exist_ok=True)
 
 # ------------------- Schemas ---------------------
 

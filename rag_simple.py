@@ -1,12 +1,11 @@
-# rag_simple.py — Local NumPy RAG + Gemini (clean summaries)
+# rag_simple.py — Local NumPy RAG + Gemini (latest-doc aware)
 
 import os
 import re
-import glob
-import uuid
 import json
 import hashlib
-from typing import List, Dict, Optional
+from typing import List
+from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv
@@ -20,36 +19,28 @@ import google.generativeai as genai
 # ---------------------------
 
 def normalize_ocr_text(text: str) -> str:
-    """
-    Fix broken OCR text like:
-    'El ectr onic R ec or d' → 'Electronic Record'
-    """
     text = re.sub(r"(?<=\w)\s(?=\w)", "", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
 
 
-def chunk_text(text: str, chunk_size: int = 800, overlap: int = 200) -> List[str]:
-    text = text.strip()
-    out, i, n = [], 0, len(text)
-    while i < n:
-        j = min(i + chunk_size, n)
+def chunk_text(text: str, chunk_size=800, overlap=200):
+    out, i = [], 0
+    while i < len(text):
+        j = min(i + chunk_size, len(text))
         out.append(text[i:j])
-        if j == n:
-            break
-        i = max(0, j - overlap)
+        i = j - overlap if j < len(text) else j
     return out
 
 
 def _read_pdf(path: str) -> str:
     reader = PdfReader(path)
-    pages = [p.extract_text() or "" for p in reader.pages]
-    return "\n".join(pages)
+    return "\n".join(p.extract_text() or "" for p in reader.pages)
 
 
 def _point_id(source: str, chunk_id: int) -> int:
-    b = hashlib.blake2b(f"{source}:{chunk_id}".encode(), digest_size=8).digest()
-    return int.from_bytes(b, "big", signed=True)
+    h = hashlib.blake2b(f"{source}:{chunk_id}".encode(), digest_size=8).digest()
+    return int.from_bytes(h, "big", signed=True)
 
 
 # ---------------------------
@@ -60,9 +51,11 @@ class LiteVectorStore:
     def __init__(self, index_dir="./lite_index"):
         self.index_dir = index_dir
         os.makedirs(index_dir, exist_ok=True)
+
         self.vectors = None
         self.ids = None
         self.payloads = []
+
         self._load()
 
     def _load(self):
@@ -93,10 +86,20 @@ class LiteVectorStore:
             self.payloads.extend(payloads)
         self._save()
 
-    def search(self, qvec, k=5):
+    def search(self, qvec, k=5, source_filter=None):
         sims = np.dot(self.vectors, qvec)
-        idxs = np.argsort(-sims)[:k]
-        return [{**self.payloads[i], "score": float(sims[i])} for i in idxs]
+        idxs = np.argsort(-sims)
+
+        results = []
+        for i in idxs:
+            p = self.payloads[i]
+            if source_filter and p["source"] != source_filter:
+                continue
+            results.append({**p, "score": float(sims[i])})
+            if len(results) == k:
+                break
+
+        return results
 
     def reset(self):
         self.vectors, self.ids, self.payloads = None, None, []
@@ -104,7 +107,7 @@ class LiteVectorStore:
 
 
 # ---------------------------
-# SimpleRAG
+# SimpleRAG (latest-doc aware)
 # ---------------------------
 
 class SimpleRAG:
@@ -114,50 +117,80 @@ class SimpleRAG:
         self.embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         self.store = LiteVectorStore(index_dir)
 
+        self.latest_source = None  # ⭐ KEY ADDITION
+
         genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
         self.model = genai.GenerativeModel(
             model_name="models/gemini-2.5-flash",
             system_instruction=(
                 "You are a document analysis assistant.\n"
-                "Use ONLY the provided context. Do not use outside knowledge.\n\n"
-                "When asked for a summary:\n"
-                "- Start with a short overview paragraph (2–3 sentences)\n"
-                "- Then provide a structured summary using markdown headings (##)\n"
-                "- Use bullet points where appropriate\n\n"
-                "If information is missing or unclear, say:\n"
-                "'Not found in the provided document.'"
+                "Use ONLY the provided context.\n"
+                "If information is missing, say so clearly.\n\n"
+                "For summaries:\n"
+                "- Start with a short overview paragraph\n"
+                "- Then use markdown headings and bullet points"
             )
         )
 
     def embed(self, texts):
-        return self.embedder.encode(texts, normalize_embeddings=True).astype(np.float32)
+        return self.embedder.encode(
+            texts, normalize_embeddings=True
+        ).astype(np.float32)
+
+    # -------- Ingestion --------
 
     def ingest_text(self, text: str, source: str):
         text = normalize_ocr_text(text)
         chunks = chunk_text(text)
         vecs = self.embed(chunks)
 
+        now = datetime.utcnow().isoformat()
+        self.latest_source = source  # ⭐ mark as active document
+
         ids = np.array([_point_id(source, i) for i in range(len(chunks))])
         payloads = [
-            {"source": source, "chunk_id": i, "text": ch}
+            {
+                "source": source,
+                "chunk_id": i,
+                "text": ch,
+                "timestamp": now
+            }
             for i, ch in enumerate(chunks)
         ]
 
         self.store.upsert(ids, vecs, payloads)
 
+    # -------- Retrieval --------
+
     def retrieve(self, question, k=5):
         qv = self.embed([question])[0]
-        return self.store.search(qv, k)
+
+        # 1️⃣ Prefer latest document
+        if self.latest_source:
+            hits = self.store.search(
+                qv, k=k, source_filter=self.latest_source
+            )
+            if hits:
+                return hits
+
+        # 2️⃣ Fallback to global search
+        return self.store.search(qv, k=k)
+
+    # -------- Answer --------
 
     def ask(self, question, return_chunks=False):
         contexts = self.retrieve(question)
+
+        if not contexts:
+            answer = "No relevant information found in the indexed documents."
+            return (answer, []) if return_chunks else answer
 
         context_text = "\n\n".join(
             f"[{c['source']}]\n{c['text']}" for c in contexts
         )
 
         prompt = f"""
-Use the context below to answer clearly and concisely.
+Use the context below to answer clearly and accurately.
 
 Question:
 {question}
@@ -169,9 +202,8 @@ Context:
         resp = self.model.generate_content(prompt)
         answer = resp.text.strip()
 
-        if return_chunks:
-            return answer, contexts
-        return answer
+        return (answer, contexts) if return_chunks else answer
 
     def recreate_collection(self):
         self.store.reset()
+        self.latest_source = None

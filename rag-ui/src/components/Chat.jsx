@@ -1,8 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import axios from "axios";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
-const API_BASE = "http://127.0.0.1:8000";
+/**
+ * Option A: Backend-only on Render
+ * Change this ONLY if backend URL changes
+ */
+const API_BASE = "https://rag-mini.onrender.com";
 
 export default function Chat() {
   const [messages, setMessages] = useState([]);
@@ -10,31 +15,42 @@ export default function Chat() {
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef(null);
 
+  // Auto-scroll on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   async function send() {
-    if (!input.trim() || loading) return;
+    const question = input.trim();
+    if (!question || loading) return;
 
-    const userMsg = { role: "user", content: input };
+    const userMsg = { role: "user", content: question };
     setMessages((m) => [...m, userMsg]);
     setInput("");
     setLoading(true);
 
     try {
       const res = await axios.post(`${API_BASE}/ask`, {
-        question: userMsg.content,
+        question,
       });
+
+      const answer =
+        res?.data?.answer ??
+        "⚠️ No answer returned from the server.";
 
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: res.data.answer },
+        { role: "assistant", content: answer },
       ]);
-    } catch {
+    } catch (err) {
+      const msg =
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Failed to get answer";
+
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: "❌ Failed to get answer" },
+        { role: "assistant", content: `❌ ${msg}` },
       ]);
     } finally {
       setLoading(false);
@@ -54,19 +70,22 @@ export default function Chat() {
         {messages.map((m, i) => (
           <div
             key={i}
-            className={`max-w-[75%] rounded-lg px-4 py-2 text-sm ${
+            className={`max-w-[75%] rounded-lg px-4 py-2 text-sm leading-relaxed ${
               m.role === "user"
                 ? "ml-auto bg-blue-600 text-white"
                 : "bg-slate-800 text-slate-100"
             }`}
           >
             {m.role === "assistant" ? (
-              <ReactMarkdown>{m.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {m.content}
+              </ReactMarkdown>
             ) : (
               m.content
             )}
           </div>
         ))}
+
         <div ref={bottomRef} />
       </div>
 

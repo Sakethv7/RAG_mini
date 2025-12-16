@@ -55,4 +55,5 @@ def ask(req: AskRequest):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "message": "RAG server running"}
+    return {"status": "ok","message": "RAG server running"}
+ 

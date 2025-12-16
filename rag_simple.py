@@ -1,4 +1,4 @@
-# rag_simple.py — Local NumPy RAG + Gemini (Render-safe, latest-doc aware)
+# rag_simple.py — Local NumPy RAG + Gemini (Render-safe, ENV-driven)
 
 import os
 import re
@@ -63,7 +63,7 @@ class LiteVectorStore:
             self.ids = np.load(f"{self.index_dir}/ids.npy")
             with open(f"{self.index_dir}/payloads.json") as f:
                 self.payloads = json.load(f)
-        except:
+        except Exception:
             self.vectors, self.ids, self.payloads = None, None, []
 
     def _save(self):
@@ -106,12 +106,26 @@ class LiteVectorStore:
 
 
 # =========================
-# SimpleRAG (Gemini-only embeddings)
+# SimpleRAG (Gemini)
 # =========================
 
 class SimpleRAG:
     def __init__(self, index_dir="./lite_index"):
         load_dotenv()
+
+        # --- ENV ---
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY not set")
+
+        self.chat_model_name = os.getenv(
+            "GEMINI_MODEL", "models/gemini-2.0-flash"
+        )
+        self.embed_model_name = os.getenv(
+            "GEMINI_EMBED_MODEL", "models/embedding-001"
+        )
+
+        genai.configure(api_key=api_key)
 
         self.store = LiteVectorStore(index_dir)
         self.meta_path = f"{index_dir}/meta.json"
@@ -119,21 +133,12 @@ class SimpleRAG:
         self.latest_source = None
         self._load_meta()
 
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise RuntimeError("GOOGLE_API_KEY not set")
-
-        genai.configure(api_key=api_key)
-
         self.chat_model = genai.GenerativeModel(
-            model_name="models/gemini-2.5-flash",
+            model_name=self.chat_model_name,
             system_instruction=(
                 "You are a document analysis assistant.\n"
                 "Use ONLY the provided context.\n"
-                "If information is missing, say so clearly.\n\n"
-                "For summaries:\n"
-                "- Start with a short overview paragraph\n"
-                "- Then use markdown headings and bullet points"
+                "If information is missing, say so clearly."
             )
         )
 
@@ -148,18 +153,23 @@ class SimpleRAG:
         with open(self.meta_path, "w") as f:
             json.dump({"latest_source": self.latest_source}, f)
 
-    # -------- Embeddings (Gemini) --------
+    # -------- Embeddings --------
 
     def embed(self, texts: List[str]) -> np.ndarray:
-        print("Embedding", len(texts), "chunks") 
+        print("Embedding", len(texts), "chunks")
 
         vectors = []
-        for t in texts:
-            r = genai.embed_content(
-                model="models/embedding-001",
-                content=t
-            )
-            vectors.append(r["embedding"])
+        for i, t in enumerate(texts):
+            try:
+                r = genai.embed_content(
+                    model=self.embed_model_name,
+                    content=t
+                )
+                vectors.append(r["embedding"])
+            except Exception as e:
+                print(f"❌ Gemini embedding failed at chunk {i}: {e}")
+                raise
+
         return np.array(vectors, dtype=np.float32)
 
     # -------- Ingestion --------
@@ -201,20 +211,17 @@ class SimpleRAG:
 
     # -------- Answer --------
 
-    def ask(self, question, return_chunks=False):
+    def ask(self, question):
         contexts = self.retrieve(question)
 
         if not contexts:
-            answer = "No relevant information found in the indexed documents."
-            return (answer, []) if return_chunks else answer
+            return "No relevant information found in the indexed documents."
 
         context_text = "\n\n".join(
             f"[{c['source']}]\n{c['text']}" for c in contexts
         )
 
         prompt = f"""
-Use the context below to answer clearly and accurately.
-
 Question:
 {question}
 
@@ -223,9 +230,7 @@ Context:
 """
 
         resp = self.chat_model.generate_content(prompt)
-        answer = resp.text.strip()
-
-        return (answer, contexts) if return_chunks else answer
+        return resp.text.strip()
 
     def recreate_collection(self):
         self.store.reset()

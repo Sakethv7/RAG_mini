@@ -7,16 +7,14 @@ import shutil
 
 app = FastAPI()
 
+# ✅ Correct CORS (no credentials)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://rag-ui-frontend.onrender.com",
-    ],
-    allow_credentials=False,   # 🔥 IMPORTANT
+    allow_origins=["https://rag-ui-frontend.onrender.com"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 rag = SimpleRAG()
 
@@ -30,7 +28,7 @@ class AskRequest(BaseModel):
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
     print("UPLOAD STARTED:", file.filename)
-    
+
     if not file.filename.lower().endswith((".pdf", ".txt", ".md")):
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
@@ -39,10 +37,11 @@ async def upload(file: UploadFile = File(...)):
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    if file.filename.endswith(".pdf"):
+    if file.filename.lower().endswith(".pdf"):
         text = read_pdf(path)
     else:
-        text = open(path, "r", encoding="utf-8").read()
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
 
     rag.ingest_text(text, source=file.filename)
 
@@ -51,8 +50,7 @@ async def upload(file: UploadFile = File(...)):
 
 @app.post("/ask")
 def ask(req: AskRequest):
-    answer = rag.ask(req.question)
-    return {"answer": answer}
+    return {"answer": rag.ask(req.question)}
 
 
 @app.get("/")

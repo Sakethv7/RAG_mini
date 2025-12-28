@@ -11,6 +11,7 @@ import numpy as np
 from dotenv import load_dotenv
 from pypdf import PdfReader
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 
 
 # =========================
@@ -40,6 +41,12 @@ def read_pdf(path: str) -> str:
 def point_id(source: str, chunk_id: int) -> int:
     h = hashlib.blake2b(f"{source}:{chunk_id}".encode(), digest_size=8).digest()
     return int.from_bytes(h, "big", signed=True)
+
+
+def _normalize_rows(mat: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    return mat / norms
 
 
 # =========================
@@ -86,6 +93,9 @@ class LiteVectorStore:
         self._save()
 
     def search(self, qvec, k=5, source_filter=None):
+        if self.vectors is None or self.vectors.size == 0:
+            return []
+
         sims = np.dot(self.vectors, qvec)
         idxs = np.argsort(-sims)
 
@@ -121,9 +131,15 @@ class SimpleRAG:
         self.chat_model_name = os.getenv(
             "GEMINI_MODEL", "models/gemini-2.0-flash"
         )
+        self.embed_provider = os.getenv("EMBED_PROVIDER", "gemini").lower()
         self.embed_model_name = os.getenv(
             "GEMINI_EMBED_MODEL", "models/embedding-001"
         )
+        self.local_embed_model = os.getenv(
+            "LOCAL_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+        )
+        self.retrieval_k = int(os.getenv("RETRIEVAL_K", 8))
+        self.answer_top_n = int(os.getenv("ANSWER_TOP_N", 5))
 
         genai.configure(api_key=api_key)
 
@@ -133,12 +149,18 @@ class SimpleRAG:
         self.latest_source = None
         self._load_meta()
 
+        self._local_encoder = None
+
         self.chat_model = genai.GenerativeModel(
             model_name=self.chat_model_name,
             system_instruction=(
                 "You are a document analysis assistant.\n"
-                "Use ONLY the provided context.\n"
-                "If information is missing, say so clearly."
+                "Use ONLY the provided context chunks.\n"
+                "Deliver a concise fit assessment for an AI/ML role.\n"
+                "Structure with bolded labels: **Assessment** (1–2 sentences), **Strengths** (3–5 bullets), **Gaps/Risks** (1–2 bullets), **Fit** (one short verdict sentence).\n"
+                "Do NOT list full resume skills or long task lists; summarize impact and relevance.\n"
+                "Do NOT include sources or citations unless explicitly asked.\n"
+                "No speculation; if information is missing, say so clearly."
             )
         )
 
@@ -156,21 +178,40 @@ class SimpleRAG:
     # -------- Embeddings --------
 
     def embed(self, texts: List[str]) -> np.ndarray:
-        print("Embedding", len(texts), "chunks")
+        print(f"Embedding {len(texts)} chunks via {self.embed_provider}")
 
-        vectors = []
-        for i, t in enumerate(texts):
-            try:
-                r = genai.embed_content(
-                    model=self.embed_model_name,
-                    content=t
-                )
-                vectors.append(r["embedding"])
-            except Exception as e:
-                print(f"❌ Gemini embedding failed at chunk {i}: {e}")
-                raise
+        if self.embed_provider == "gemini":
+            vectors = []
+            for i, t in enumerate(texts):
+                try:
+                    r = genai.embed_content(
+                        model=self.embed_model_name,
+                        content=t
+                    )
+                    vectors.append(r["embedding"])
+                except Exception as e:
+                    print(f"❌ Gemini embedding failed at chunk {i}: {e}")
+                    raise
+            return np.array(vectors, dtype=np.float32)
 
-        return np.array(vectors, dtype=np.float32)
+        # Local embeddings
+        try:
+            if self._local_encoder is None:
+                from sentence_transformers import SentenceTransformer
+
+                self._local_encoder = SentenceTransformer(self.local_embed_model)
+            vecs = self._local_encoder.encode(
+                texts, convert_to_numpy=True, normalize_embeddings=False
+            )
+            return vecs.astype(np.float32)
+        except ImportError as e:
+            raise RuntimeError(
+                "Local embedding model requested but sentence-transformers is not installed. "
+                "pip install sentence-transformers"
+            ) from e
+        except Exception as e:
+            print(f"❌ Local embedding failed: {e}")
+            raise
 
     # -------- Ingestion --------
 
@@ -179,6 +220,7 @@ class SimpleRAG:
         chunks = chunk_text(text)
 
         vectors = self.embed(chunks)
+        vectors = _normalize_rows(vectors)
         now = datetime.utcnow().isoformat()
 
         self.latest_source = source
@@ -199,26 +241,25 @@ class SimpleRAG:
 
     # -------- Retrieval --------
 
-    def retrieve(self, question, k=5):
+    def retrieve(self, question, k=None):
+        if self.store.vectors is None or self.store.vectors.size == 0:
+            return []
+
         qv = self.embed([question])[0]
-
-        if self.latest_source:
-            hits = self.store.search(qv, k=k, source_filter=self.latest_source)
-            if hits:
-                return hits
-
-        return self.store.search(qv, k=k)
+        qv = qv / (np.linalg.norm(qv) or 1)
+        return self.store.search(qv, k=k or self.retrieval_k)
 
     # -------- Answer --------
 
     def ask(self, question):
-        contexts = self.retrieve(question)
+        contexts = self.retrieve(question, k=self.retrieval_k)
+        contexts = contexts[: self.answer_top_n]
 
         if not contexts:
             return "No relevant information found in the indexed documents."
 
         context_text = "\n\n".join(
-            f"[{c['source']}]\n{c['text']}" for c in contexts
+            f"[{c['source']}:{c['chunk_id']}]\n{c['text']}" for c in contexts
         )
 
         prompt = f"""
@@ -227,6 +268,13 @@ Question:
 
 Context:
 {context_text}
+
+Formatting rules (must follow):
+- Use bolded labels to separate sections: **Assessment**, **Strengths**, **Gaps/Risks**, **Fit**.
+- Be brief: strengths 3–5 bullets max; gaps 1–2 bullets max.
+- Focus on relevance to AI/ML role; avoid full skill dumps or long experience lists.
+- No sources or citations unless explicitly asked.
+- If context is insufficient, say so explicitly. Avoid speculation.
 """
 
         resp = self.chat_model.generate_content(prompt)

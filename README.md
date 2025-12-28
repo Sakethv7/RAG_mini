@@ -1,12 +1,12 @@
 # RAG-Mini — Simple Document Q&A (Gemini + Local Vector Store)
 
-A from-scratch Retrieval-Augmented Generation (RAG) system for querying documents using local embeddings and Google Gemini.
+A from-scratch Retrieval-Augmented Generation (RAG) system for querying documents using Google Gemini for both embeddings and answer generation, with a tiny NumPy vector store persisted on disk.
 
 No LangChain.
 No Pinecone / Qdrant Cloud.
 No managed vector DB.
 
-Embeddings run fully offline, vectors are stored locally, and Gemini is used only for final answers.
+Embeddings are API-based (Gemini) and vectors are stored locally; set `GOOGLE_API_KEY` before running.
 
 
 
@@ -17,29 +17,28 @@ React UI (Vite)
    ▼
 FastAPI Backend
    │
-   ├─ Local embeddings (SentenceTransformers)
+   ├─ Gemini embeddings (API)
    ├─ NumPy vector store (./lite_index)
    ├─ Retrieval (cosine similarity)
-   └─ Gemini (answer synthesis only)
+   └─ Gemini (answer synthesis)
 
 ## Features
 - **Document formats:** `.txt`, `.md`, `.pdf`
 - **Smart chunking:** 800 chars with 200 overlap (configurable)
-- **Semantic search:** `sentence-transformers/all-MiniLM-L6-v2` (local, no API)
+- **Semantic search:** Gemini embeddings (default) or local `sentence-transformers` + cosine similarity
 - **Local vector store:** tiny NumPy index on disk (`./lite_index`) — no services to run
 - **Gemini answers:** concise responses grounded in retrieved context
 - **CLI chat:** ask questions in your terminal
-- **Robustness:** prompt budgets + retries + extractive fallback so you always get something
 
 ✨ What This Project Does
 
 Upload documents (.pdf, .txt, .md)
 
-Chunk + embed them locally using Sentence Transformers
+Chunk + embed them with Gemini embeddings
 
 Store vectors in a lightweight NumPy index
 
-Retrieve the most relevant chunks per query
+Retrieve the most relevant chunks per query via cosine similarity
 
 Generate structured, grounded answers using Gemini
 
@@ -100,3 +99,9 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+export GOOGLE_API_KEY=your_key_here
+```
+
+### Embedding options
+- Default: Gemini embeddings (`EMBED_PROVIDER=gemini`, `GEMINI_EMBED_MODEL=models/embedding-001`), requires `GOOGLE_API_KEY`.
+- Local (no embedding API calls): set `EMBED_PROVIDER=local` and optionally `LOCAL_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2`. Install the extra deps: `pip install sentence-transformers`.

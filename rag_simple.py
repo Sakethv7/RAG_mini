@@ -41,8 +41,9 @@ def read_pdf(path: str) -> str:
 
 
 def point_id(source: str, chunk_id: int) -> int:
+    # Use unsigned IDs so backends like Qdrant accept them.
     h = hashlib.blake2b(f"{source}:{chunk_id}".encode(), digest_size=8).digest()
-    return int.from_bytes(h, "big", signed=True)
+    return int.from_bytes(h, "big", signed=False)
 
 
 def _normalize_rows(mat: np.ndarray) -> np.ndarray:

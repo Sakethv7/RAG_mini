@@ -194,14 +194,27 @@ class QdrantVectorStore:
             # Fallback to HTTP points_api if client is very old
             http_client = getattr(self.client, "http", None)
             if http_client and hasattr(http_client, "points_api"):
-                res = http_client.points_api.search_points(
-                    collection_name=self.collection,
-                    search_request=qmodels.SearchRequest(
-                        vector=qvec.tolist(),
-                        limit=k,
-                        filter=qmodels.Filter(must=must) if must else None,
-                    ),
-                ).result
+                points_api = http_client.points_api
+                if hasattr(points_api, "search_points"):
+                    res = points_api.search_points(
+                        collection_name=self.collection,
+                        search_request=qmodels.SearchRequest(
+                            vector=qvec.tolist(),
+                            limit=k,
+                            filter=qmodels.Filter(must=must) if must else None,
+                        ),
+                    ).result
+                elif hasattr(points_api, "search"):
+                    res = points_api.search(
+                        collection_name=self.collection,
+                        search_request=qmodels.SearchRequest(
+                            vector=qvec.tolist(),
+                            limit=k,
+                            filter=qmodels.Filter(must=must) if must else None,
+                        ),
+                    ).result
+                else:
+                    raise RuntimeError("qdrant-client points_api missing search; please upgrade qdrant-client")
             else:
                 raise RuntimeError("qdrant-client is missing search; upgrade qdrant-client>=1.9.0")
         out = []

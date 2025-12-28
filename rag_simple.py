@@ -230,6 +230,10 @@ class SimpleRAG:
         load_dotenv()
 
         # --- ENV ---
+        index_dir = os.getenv("INDEX_DIR", index_dir)
+        os.makedirs(index_dir, exist_ok=True)
+        self.index_dir = index_dir
+
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise RuntimeError("GOOGLE_API_KEY not set")
@@ -263,7 +267,7 @@ class SimpleRAG:
             )
         else:
             self.store = LiteVectorStore(index_dir)
-        self.meta_path = f"{index_dir}/meta.json"
+        self.meta_path = f"{self.index_dir}/meta.json"
 
         self.latest_source = None
         self._load_meta()
